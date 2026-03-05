@@ -1,6 +1,6 @@
 {
-  "name": "@dxiongya/kv",
-  "version": "2.0.0",
+  "name": "clave",
+  "version": "0.0.1",
   "description": "Secure API key storage via macOS Keychain",
   "main": "src/index.js",
   "types": "src/index.d.ts",

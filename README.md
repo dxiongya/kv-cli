@@ -1,12 +1,14 @@
-# kv
+# clave
 
 Secure API key storage via macOS Keychain. Zero dependencies.
+
+> *clave* — Latin/Spanish for "key". The root of *enclave*.
 
 ## Install
 
 ```bash
 # npm
-npm install -g @dxiongya/kv
+npm install -g clave
 
 # Homebrew
 brew install dxiongya/tap/kv
@@ -52,7 +54,7 @@ kv rm openai
 ## Node.js API
 
 ```js
-const { kv } = require('@dxiongya/kv')
+const { kv } = require('clave')
 
 // Get a key
 const key = kv('openrouter')
