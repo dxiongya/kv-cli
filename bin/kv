@@ -1,0 +1,231 @@
+#!/bin/bash
+#
+# kv - Secure API key storage via macOS Keychain
+# https://github.com/dxiongya/kv-cli
+#
+
+set -euo pipefail
+
+readonly SERVICE_PREFIX="kv-cli"
+readonly CLIP_CLEAR_SECONDS=10
+readonly VERSION="1.0.0"
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+CYAN='\033[0;36m'
+DIM='\033[2m'
+NC='\033[0m'
+
+# --- Helpers ---
+
+die() {
+  printf "${RED}error:${NC} %s\n" "$1" >&2
+  exit 1
+}
+
+info() {
+  printf "${GREEN}ok:${NC} %s\n" "$1"
+}
+
+warn() {
+  printf "${YELLOW}warn:${NC} %s\n" "$1"
+}
+
+keychain_service() {
+  echo "${SERVICE_PREFIX}:$1"
+}
+
+# --- Commands ---
+
+cmd_set() {
+  local name="${1:-}"
+  local value="${2:-}"
+
+  [[ -z "$name" ]] && die "usage: kv set <name> [value]"
+
+  # If no value provided, read from stdin (interactive or pipe)
+  if [[ -z "$value" ]]; then
+    if [[ -t 0 ]]; then
+      printf "${CYAN}Enter value for ${NC}%s${CYAN}:${NC} " "$name"
+      read -rs value
+      echo
+      [[ -z "$value" ]] && die "value cannot be empty"
+    else
+      read -r value
+      [[ -z "$value" ]] && die "value cannot be empty"
+    fi
+  fi
+
+  local service
+  service=$(keychain_service "$name")
+
+  # Delete existing entry if present
+  security delete-generic-password -s "$service" -a "$USER" >/dev/null 2>&1 || true
+
+  # Add to Keychain
+  security add-generic-password \
+    -s "$service" \
+    -a "$USER" \
+    -w "$value" \
+    -T "" \
+    -U 2>/dev/null \
+    || die "failed to store key in Keychain"
+
+  info "stored ${CYAN}${name}${NC}"
+}
+
+cmd_get() {
+  local name="${1:-}"
+  local print_mode=false
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --print|-p) print_mode=true; shift ;;
+      -*) die "unknown flag: $1" ;;
+      *) name="$1"; shift ;;
+    esac
+  done
+
+  [[ -z "$name" ]] && die "usage: kv get <name> [--print]"
+
+  local service
+  service=$(keychain_service "$name")
+
+  local value
+  value=$(security find-generic-password -s "$service" -a "$USER" -w 2>/dev/null) \
+    || die "key not found: ${name}"
+
+  if $print_mode; then
+    printf "%s\n" "$value"
+  else
+    printf "%s" "$value" | pbcopy
+    info "copied ${CYAN}${name}${NC} to clipboard (clears in ${CLIP_CLEAR_SECONDS}s)"
+
+    (
+      sleep "$CLIP_CLEAR_SECONDS"
+      current=$(pbpaste 2>/dev/null || true)
+      if [[ "$current" == "$value" ]]; then
+        echo -n "" | pbcopy
+      fi
+    ) &
+    disown
+  fi
+}
+
+cmd_list() {
+  local prefix="${1:-}"
+
+  local items
+  items=$(security dump-keychain 2>/dev/null \
+    | grep -o "\"svce\"<blob>=\"${SERVICE_PREFIX}:[^\"]*\"" \
+    | sed "s/\"svce\"<blob>=\"${SERVICE_PREFIX}://;s/\"$//" \
+    | sort -u)
+
+  if [[ -z "$items" ]]; then
+    warn "no keys stored"
+    return
+  fi
+
+  if [[ -n "$prefix" ]]; then
+    items=$(echo "$items" | grep "^${prefix}" || true)
+    if [[ -z "$items" ]]; then
+      warn "no keys matching: ${prefix}"
+      return
+    fi
+  fi
+
+  printf "${DIM}%-40s${NC}\n" "NAME"
+  echo "$items" | while IFS= read -r item; do
+    printf "  %s\n" "$item"
+  done
+}
+
+cmd_rm() {
+  local name="${1:-}"
+  [[ -z "$name" ]] && die "usage: kv rm <name>"
+
+  local service
+  service=$(keychain_service "$name")
+
+  security delete-generic-password -s "$service" -a "$USER" >/dev/null 2>&1 \
+    || die "key not found: ${name}"
+
+  info "deleted ${CYAN}${name}${NC}"
+}
+
+cmd_env() {
+  local prefix="${1:-}"
+  [[ -z "$prefix" ]] && die "usage: kv env <prefix>"
+
+  local items
+  items=$(security dump-keychain 2>/dev/null \
+    | grep -o "\"svce\"<blob>=\"${SERVICE_PREFIX}:[^\"]*\"" \
+    | sed "s/\"svce\"<blob>=\"${SERVICE_PREFIX}://;s/\"$//" \
+    | sort -u \
+    | grep "^${prefix}" || true)
+
+  if [[ -z "$items" ]]; then
+    die "no keys matching prefix: ${prefix}"
+  fi
+
+  echo "$items" | while IFS= read -r item; do
+    local service
+    service=$(keychain_service "$item")
+    local value
+    value=$(security find-generic-password -s "$service" -a "$USER" -w 2>/dev/null || true)
+    if [[ -n "$value" ]]; then
+      local env_name
+      env_name=$(echo "$item" | sed "s|${prefix}||" | tr '[:lower:]/-' '[:upper:]__')
+      printf "%s=%s\n" "$env_name" "$value"
+    fi
+  done
+}
+
+cmd_help() {
+  cat <<EOF
+${CYAN}kv${NC} v${VERSION} - Secure API key storage via macOS Keychain
+
+${YELLOW}USAGE${NC}
+  kv <command> [args]
+
+${YELLOW}COMMANDS${NC}
+  set <name> [value]    Store a key (omit value for secure input)
+  get <name> [--print]  Retrieve a key (default: clipboard, 10s clear)
+  list [prefix]         List stored key names
+  rm <name>             Delete a key
+  env <prefix>          Export keys as KEY=VALUE format
+
+${YELLOW}EXAMPLES${NC}
+  kv set openai sk-proj-xxxxx
+  kv set openai                   ${DIM}# secure hidden input${NC}
+  echo "sk-xxx" | kv set openai   ${DIM}# pipe (avoids shell history)${NC}
+  kv get openai                   ${DIM}# copy to clipboard${NC}
+  kv get openai --print           ${DIM}# print to terminal${NC}
+  kv list                         ${DIM}# list all keys${NC}
+  kv list aws/                    ${DIM}# filter by prefix${NC}
+  kv env aws/prod/                ${DIM}# export as env vars${NC}
+
+${YELLOW}SECURITY${NC}
+  - Keys stored in macOS Keychain (hardware-backed encryption)
+  - Clipboard auto-clears after ${CLIP_CLEAR_SECONDS}s
+  - Use secure input or pipe to avoid shell history leaks
+EOF
+}
+
+# --- Main ---
+
+command="${1:-help}"
+shift || true
+
+case "$command" in
+  set)   cmd_set "$@" ;;
+  get)   cmd_get "$@" ;;
+  list|ls) cmd_list "$@" ;;
+  rm|delete) cmd_rm "$@" ;;
+  env)   cmd_env "$@" ;;
+  help|--help|-h) cmd_help ;;
+  version|--version|-v) echo "kv v${VERSION}" ;;
+  *)     die "unknown command: $command (try 'kv help')" ;;
+esac
