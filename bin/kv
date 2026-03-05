@@ -1,253 +1,171 @@
-#!/bin/bash
-#
-# kv - Secure API key storage via macOS Keychain
-# https://github.com/dxiongya/kv-cli
-#
+#!/usr/bin/env node
 
-set -euo pipefail
+const { execSync } = require('child_process');
+const readline = require('readline');
+const keychain = require('../src/keychain');
 
-readonly SERVICE_PREFIX="kv-cli"
-readonly CLIP_CLEAR_SECONDS=10
-readonly VERSION="1.1.0"
+const VERSION = '2.0.0';
+const CLIP_CLEAR_SECONDS = 10;
 
-# Colors
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-CYAN='\033[0;36m'
-DIM='\033[2m'
-NC='\033[0m'
+// Colors
+const c = {
+  red: s => `\x1b[0;31m${s}\x1b[0m`,
+  green: s => `\x1b[0;32m${s}\x1b[0m`,
+  yellow: s => `\x1b[0;33m${s}\x1b[0m`,
+  cyan: s => `\x1b[0;36m${s}\x1b[0m`,
+  dim: s => `\x1b[2m${s}\x1b[0m`,
+};
 
-# --- Helpers ---
-
-die() {
-  printf "${RED}error:${NC} %s\n" "$1" >&2
-  exit 1
+function die(msg) {
+  console.error(`${c.red('error:')} ${msg}`);
+  process.exit(1);
 }
 
-info() {
-  printf "${GREEN}ok:${NC} %s\n" "$1"
+function info(msg) {
+  console.log(`${c.green('ok:')} ${msg}`);
 }
 
-warn() {
-  printf "${YELLOW}warn:${NC} %s\n" "$1"
+function warn(msg) {
+  console.log(`${c.yellow('warn:')} ${msg}`);
 }
 
-keychain_service() {
-  echo "${SERVICE_PREFIX}:$1"
+// --- Commands ---
+
+async function cmdSet(args) {
+  const name = args[0];
+  let value = args[1];
+
+  if (!name) die('usage: kv set <name> [value]');
+
+  if (!value) {
+    if (process.stdin.isTTY) {
+      value = await new Promise((resolve) => {
+        process.stdout.write(`${c.cyan('Enter value for ')}${name}${c.cyan(':')} `);
+        const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: true });
+        // Hide input
+        process.stdout.write('\x1b[8m');
+        rl.question('', (answer) => {
+          process.stdout.write('\x1b[28m\n');
+          rl.close();
+          resolve(answer);
+        });
+      });
+    } else {
+      value = await new Promise((resolve) => {
+        let data = '';
+        process.stdin.setEncoding('utf-8');
+        process.stdin.on('data', chunk => data += chunk);
+        process.stdin.on('end', () => resolve(data.trim()));
+      });
+    }
+    if (!value) die('value cannot be empty');
+  }
+
+  keychain.set(name, value);
+  info(`stored ${c.cyan(name)}`);
 }
 
-# Get all kv-cli items from Keychain
-get_all_items() {
-  security dump-keychain 2>/dev/null \
-    | grep -o "\"svce\"<blob>=\"${SERVICE_PREFIX}:[^\"]*\"" \
-    | sed "s/\"svce\"<blob>=\"${SERVICE_PREFIX}://;s/\"$//" \
-    | sort -u
+function cmdGet(args) {
+  let name = '';
+  let printMode = false;
+
+  for (const arg of args) {
+    if (arg === '--print' || arg === '-p') printMode = true;
+    else if (arg.startsWith('-')) die(`unknown flag: ${arg}`);
+    else name = arg;
+  }
+
+  if (!name) die('usage: kv get <name> [--print]');
+
+  const value = keychain.get(name);
+
+  if (printMode) {
+    process.stdout.write(value + '\n');
+  } else {
+    execSync('pbcopy', { input: value });
+    info(`copied ${c.cyan(name)} to clipboard (clears in ${CLIP_CLEAR_SECONDS}s)`);
+
+    // Clear clipboard after timeout
+    const child = require('child_process').spawn('bash', ['-c',
+      `sleep ${CLIP_CLEAR_SECONDS} && current=$(pbpaste 2>/dev/null) && [ "$current" = '${value.replace(/'/g, "'\\''")}' ] && echo -n "" | pbcopy`
+    ], { detached: true, stdio: 'ignore' });
+    child.unref();
+  }
 }
 
-# --- Commands ---
+function cmdList(args) {
+  const prefix = args[0] || '';
+  const items = keychain.list(prefix || undefined);
 
-cmd_set() {
-  local name="${1:-}"
-  local value="${2:-}"
+  if (items.length === 0) {
+    warn(prefix ? `no keys matching: ${prefix}` : 'no keys stored');
+    return;
+  }
 
-  [[ -z "$name" ]] && die "usage: kv set <name> [value]"
-
-  # If no value provided, read from stdin (interactive or pipe)
-  if [[ -z "$value" ]]; then
-    if [[ -t 0 ]]; then
-      printf "${CYAN}Enter value for ${NC}%s${CYAN}:${NC} " "$name"
-      read -rs value
-      echo
-      [[ -z "$value" ]] && die "value cannot be empty"
-    else
-      read -r value
-      [[ -z "$value" ]] && die "value cannot be empty"
-    fi
-  fi
-
-  local service
-  service=$(keychain_service "$name")
-
-  # Delete existing entry if present
-  security delete-generic-password -s "$service" -a "$USER" >/dev/null 2>&1 || true
-
-  # Add to Keychain
-  security add-generic-password \
-    -s "$service" \
-    -a "$USER" \
-    -w "$value" \
-    -T "" \
-    -U 2>/dev/null \
-    || die "failed to store key in Keychain"
-
-  info "stored ${CYAN}${name}${NC}"
+  console.log(c.dim('NAME'));
+  for (const item of items) {
+    console.log(`  ${item}`);
+  }
 }
 
-cmd_get() {
-  local name="${1:-}"
-  local print_mode=false
+function cmdGroups() {
+  const { grouped, ungrouped } = keychain.groups();
 
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      --print|-p) print_mode=true; shift ;;
-      -*) die "unknown flag: $1" ;;
-      *) name="$1"; shift ;;
-    esac
-  done
+  if (Object.keys(grouped).length === 0 && ungrouped.length === 0) {
+    warn('no keys stored');
+    return;
+  }
 
-  [[ -z "$name" ]] && die "usage: kv get <name> [--print]"
+  console.log(`${c.dim('GROUP')}                          ${c.dim('KEYS')}`);
 
-  local service
-  service=$(keychain_service "$name")
+  const sorted = Object.entries(grouped).sort((a, b) => b[1] - a[1]);
+  for (const [name, count] of sorted) {
+    console.log(`  ${c.cyan(`${name}/`.padEnd(28))} ${count}`);
+  }
 
-  local value
-  value=$(security find-generic-password -s "$service" -a "$USER" -w 2>/dev/null) \
-    || die "key not found: ${name}"
-
-  if $print_mode; then
-    printf "%s\n" "$value"
-  else
-    printf "%s" "$value" | pbcopy
-    info "copied ${CYAN}${name}${NC} to clipboard (clears in ${CLIP_CLEAR_SECONDS}s)"
-
-    (
-      sleep "$CLIP_CLEAR_SECONDS"
-      current=$(pbpaste 2>/dev/null || true)
-      if [[ "$current" == "$value" ]]; then
-        echo -n "" | pbcopy
-      fi
-    ) &
-    disown
-  fi
+  if (ungrouped.length > 0) {
+    console.log(`  ${c.dim(`(ungrouped)`.padEnd(28))} ${c.dim(ungrouped.length)}`);
+  }
 }
 
-cmd_list() {
-  local prefix="${1:-}"
+function cmdRm(args) {
+  let name = '';
+  let rmAll = false;
 
-  local items
-  items=$(get_all_items)
+  for (const arg of args) {
+    if (arg === '--all' || arg === '-a') rmAll = true;
+    else if (arg.startsWith('-')) die(`unknown flag: ${arg}`);
+    else name = arg;
+  }
 
-  if [[ -z "$items" ]]; then
-    warn "no keys stored"
-    return
-  fi
+  if (!name) die('usage: kv rm <name> [--all]');
 
-  if [[ -n "$prefix" ]]; then
-    items=$(echo "$items" | grep "^${prefix}" || true)
-    if [[ -z "$items" ]]; then
-      warn "no keys matching: ${prefix}"
-      return
-    fi
-  fi
-
-  printf "${DIM}%-40s${NC}\n" "NAME"
-  echo "$items" | while IFS= read -r item; do
-    printf "  %s\n" "$item"
-  done
+  if (rmAll) {
+    const count = keychain.rmGroup(name);
+    info(`deleted ${c.cyan(count)} keys matching ${c.cyan(name)}`);
+  } else {
+    keychain.rm(name);
+    info(`deleted ${c.cyan(name)}`);
+  }
 }
 
-cmd_rm() {
-  local name="${1:-}"
-  local rm_all=false
+function cmdEnv(args) {
+  const prefix = args[0];
+  if (!prefix) die('usage: kv env <prefix>');
 
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      --all|-a) rm_all=true; shift ;;
-      -*) die "unknown flag: $1" ;;
-      *) name="$1"; shift ;;
-    esac
-  done
-
-  [[ -z "$name" ]] && die "usage: kv rm <name> [--all]"
-
-  if $rm_all; then
-    # Delete all keys matching prefix
-    local items
-    items=$(get_all_items | grep "^${name}" || true)
-
-    if [[ -z "$items" ]]; then
-      die "no keys matching: ${name}"
-    fi
-
-    local count=0
-    echo "$items" | while IFS= read -r item; do
-      local service
-      service=$(keychain_service "$item")
-      security delete-generic-password -s "$service" -a "$USER" >/dev/null 2>&1 || true
-    done
-    count=$(echo "$items" | wc -l | tr -d ' ')
-    info "deleted ${CYAN}${count}${NC} keys matching ${CYAN}${name}${NC}"
-  else
-    local service
-    service=$(keychain_service "$name")
-    security delete-generic-password -s "$service" -a "$USER" >/dev/null 2>&1 \
-      || die "key not found: ${name}"
-    info "deleted ${CYAN}${name}${NC}"
-  fi
+  const vars = keychain.env(prefix);
+  for (const [key, value] of Object.entries(vars)) {
+    console.log(`${key}=${value}`);
+  }
 }
 
-cmd_env() {
-  local prefix="${1:-}"
-  [[ -z "$prefix" ]] && die "usage: kv env <prefix>"
+function cmdHelp() {
+  console.log(`${c.cyan('kv')} v${VERSION} - Secure API key storage via macOS Keychain
 
-  local items
-  items=$(get_all_items | grep "^${prefix}" || true)
-
-  if [[ -z "$items" ]]; then
-    die "no keys matching prefix: ${prefix}"
-  fi
-
-  echo "$items" | while IFS= read -r item; do
-    local service
-    service=$(keychain_service "$item")
-    local value
-    value=$(security find-generic-password -s "$service" -a "$USER" -w 2>/dev/null || true)
-    if [[ -n "$value" ]]; then
-      local env_name
-      env_name=$(echo "$item" | sed "s|${prefix}||" | tr '[:lower:]/-' '[:upper:]__')
-      printf "%s=%s\n" "$env_name" "$value"
-    fi
-  done
-}
-
-cmd_groups() {
-  local items
-  items=$(get_all_items)
-
-  if [[ -z "$items" ]]; then
-    warn "no keys stored"
-    return
-  fi
-
-  # Extract group names (part before first /) and count; ungrouped keys shown as-is
-  local grouped ungrouped
-  grouped=$(echo "$items" | grep '/' | cut -d'/' -f1 | sort | uniq -c | sort -rn || true)
-  ungrouped=$(echo "$items" | grep -v '/' || true)
-
-  printf "${DIM}%-30s %s${NC}\n" "GROUP" "KEYS"
-
-  if [[ -n "$grouped" ]]; then
-    echo "$grouped" | while read -r count name; do
-      printf "  ${CYAN}%-28s${NC} %s\n" "$name/" "$count"
-    done
-  fi
-
-  if [[ -n "$ungrouped" ]]; then
-    local uc
-    uc=$(echo "$ungrouped" | wc -l | tr -d ' ')
-    printf "  ${DIM}%-28s %s${NC}\n" "(ungrouped)" "$uc"
-  fi
-}
-
-cmd_help() {
-  cat <<EOF
-${CYAN}kv${NC} v${VERSION} - Secure API key storage via macOS Keychain
-
-${YELLOW}USAGE${NC}
+${c.yellow('USAGE')}
   kv <command> [args]
 
-${YELLOW}COMMANDS${NC}
+${c.yellow('COMMANDS')}
   set <name> [value]    Store a key (omit value for secure input)
   get <name> [--print]  Retrieve a key (default: clipboard, 10s clear)
   list [prefix]         List stored key names
@@ -255,40 +173,53 @@ ${YELLOW}COMMANDS${NC}
   rm <name> [--all]     Delete a key or all keys in a group
   env <prefix>          Export keys as KEY=VALUE format
 
-${YELLOW}EXAMPLES${NC}
+${c.yellow('EXAMPLES')}
   kv set openai sk-proj-xxxxx
-  kv set openai                       ${DIM}# secure hidden input${NC}
-  echo "sk-xxx" | kv set openai       ${DIM}# pipe (avoids shell history)${NC}
-  kv get openai                       ${DIM}# copy to clipboard${NC}
-  kv get openai --print               ${DIM}# print to terminal${NC}
-  kv list                             ${DIM}# list all keys${NC}
-  kv list openrouter/                 ${DIM}# list keys in a group${NC}
-  kv groups                           ${DIM}# show all groups${NC}
-  kv set openrouter/main sk-or-xxx    ${DIM}# store key in a group${NC}
-  kv set openrouter/dev sk-or-yyy     ${DIM}# another key in same group${NC}
-  kv rm openrouter/ --all             ${DIM}# delete entire group${NC}
-  kv env openrouter/                  ${DIM}# export group as env vars${NC}
+  kv set openai                       ${c.dim('# secure hidden input')}
+  echo "sk-xxx" | kv set openai       ${c.dim('# pipe (avoids shell history)')}
+  kv get openai                       ${c.dim('# copy to clipboard')}
+  kv get openai --print               ${c.dim('# print to terminal')}
+  kv list                             ${c.dim('# list all keys')}
+  kv set openrouter/main sk-or-xxx    ${c.dim('# store key in a group')}
+  kv set openrouter/dev sk-or-yyy     ${c.dim('# another key in same group')}
+  kv groups                           ${c.dim('# show all groups')}
+  kv list openrouter/                 ${c.dim('# list keys in a group')}
+  kv rm openrouter/ --all             ${c.dim('# delete entire group')}
+  kv env openrouter/                  ${c.dim('# export group as env vars')}
 
-${YELLOW}SECURITY${NC}
+${c.yellow('NODE.JS API')}
+  const { kv } = require('@dxiongya/kv')
+  const key = kv('openrouter')
+  const key2 = kv('openrouter/main')
+
+${c.yellow('SECURITY')}
   - Keys stored in macOS Keychain (hardware-backed encryption)
   - Clipboard auto-clears after ${CLIP_CLEAR_SECONDS}s
-  - Use secure input or pipe to avoid shell history leaks
-EOF
+  - Use secure input or pipe to avoid shell history leaks`);
 }
 
-# --- Main ---
+// --- Main ---
 
-command="${1:-help}"
-shift || true
+const [command = 'help', ...args] = process.argv.slice(2);
 
-case "$command" in
-  set)   cmd_set "$@" ;;
-  get)   cmd_get "$@" ;;
-  list|ls) cmd_list "$@" ;;
-  groups) cmd_groups "$@" ;;
-  rm|delete) cmd_rm "$@" ;;
-  env)   cmd_env "$@" ;;
-  help|--help|-h) cmd_help ;;
-  version|--version|-v) echo "kv v${VERSION}" ;;
-  *)     die "unknown command: $command (try 'kv help')" ;;
-esac
+const commands = {
+  set: () => cmdSet(args),
+  get: () => cmdGet(args),
+  list: () => cmdList(args),
+  ls: () => cmdList(args),
+  groups: () => cmdGroups(),
+  rm: () => cmdRm(args),
+  delete: () => cmdRm(args),
+  env: () => cmdEnv(args),
+  help: cmdHelp,
+  '--help': cmdHelp,
+  '-h': cmdHelp,
+  version: () => console.log(`kv v${VERSION}`),
+  '--version': () => console.log(`kv v${VERSION}`),
+  '-v': () => console.log(`kv v${VERSION}`),
+};
+
+const fn = commands[command];
+if (!fn) die(`unknown command: ${command} (try 'kv help')`);
+
+Promise.resolve(fn()).catch(err => die(err.message));

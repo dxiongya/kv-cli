@@ -1,0 +1,31 @@
+{
+  "name": "@dxiongya/kv",
+  "version": "2.0.0",
+  "description": "Secure API key storage via macOS Keychain",
+  "main": "src/index.js",
+  "types": "src/index.d.ts",
+  "bin": {
+    "kv": "bin/kv"
+  },
+  "files": [
+    "bin",
+    "src"
+  ],
+  "keywords": [
+    "keychain",
+    "secrets",
+    "api-keys",
+    "cli",
+    "macos",
+    "security"
+  ],
+  "author": "dxiongya",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dxiongya/kv-cli.git"
+  },
+  "engines": {
+    "node": ">=16"
+  }
+}
