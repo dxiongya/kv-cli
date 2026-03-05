@@ -8,7 +8,7 @@ set -euo pipefail
 
 readonly SERVICE_PREFIX="kv-cli"
 readonly CLIP_CLEAR_SECONDS=10
-readonly VERSION="1.0.0"
+readonly VERSION="1.1.0"
 
 # Colors
 RED='\033[0;31m'
@@ -35,6 +35,14 @@ warn() {
 
 keychain_service() {
   echo "${SERVICE_PREFIX}:$1"
+}
+
+# Get all kv-cli items from Keychain
+get_all_items() {
+  security dump-keychain 2>/dev/null \
+    | grep -o "\"svce\"<blob>=\"${SERVICE_PREFIX}:[^\"]*\"" \
+    | sed "s/\"svce\"<blob>=\"${SERVICE_PREFIX}://;s/\"$//" \
+    | sort -u
 }
 
 # --- Commands ---
@@ -118,10 +126,7 @@ cmd_list() {
   local prefix="${1:-}"
 
   local items
-  items=$(security dump-keychain 2>/dev/null \
-    | grep -o "\"svce\"<blob>=\"${SERVICE_PREFIX}:[^\"]*\"" \
-    | sed "s/\"svce\"<blob>=\"${SERVICE_PREFIX}://;s/\"$//" \
-    | sort -u)
+  items=$(get_all_items)
 
   if [[ -z "$items" ]]; then
     warn "no keys stored"
@@ -144,15 +149,42 @@ cmd_list() {
 
 cmd_rm() {
   local name="${1:-}"
-  [[ -z "$name" ]] && die "usage: kv rm <name>"
+  local rm_all=false
 
-  local service
-  service=$(keychain_service "$name")
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --all|-a) rm_all=true; shift ;;
+      -*) die "unknown flag: $1" ;;
+      *) name="$1"; shift ;;
+    esac
+  done
 
-  security delete-generic-password -s "$service" -a "$USER" >/dev/null 2>&1 \
-    || die "key not found: ${name}"
+  [[ -z "$name" ]] && die "usage: kv rm <name> [--all]"
 
-  info "deleted ${CYAN}${name}${NC}"
+  if $rm_all; then
+    # Delete all keys matching prefix
+    local items
+    items=$(get_all_items | grep "^${name}" || true)
+
+    if [[ -z "$items" ]]; then
+      die "no keys matching: ${name}"
+    fi
+
+    local count=0
+    echo "$items" | while IFS= read -r item; do
+      local service
+      service=$(keychain_service "$item")
+      security delete-generic-password -s "$service" -a "$USER" >/dev/null 2>&1 || true
+    done
+    count=$(echo "$items" | wc -l | tr -d ' ')
+    info "deleted ${CYAN}${count}${NC} keys matching ${CYAN}${name}${NC}"
+  else
+    local service
+    service=$(keychain_service "$name")
+    security delete-generic-password -s "$service" -a "$USER" >/dev/null 2>&1 \
+      || die "key not found: ${name}"
+    info "deleted ${CYAN}${name}${NC}"
+  fi
 }
 
 cmd_env() {
@@ -160,11 +192,7 @@ cmd_env() {
   [[ -z "$prefix" ]] && die "usage: kv env <prefix>"
 
   local items
-  items=$(security dump-keychain 2>/dev/null \
-    | grep -o "\"svce\"<blob>=\"${SERVICE_PREFIX}:[^\"]*\"" \
-    | sed "s/\"svce\"<blob>=\"${SERVICE_PREFIX}://;s/\"$//" \
-    | sort -u \
-    | grep "^${prefix}" || true)
+  items=$(get_all_items | grep "^${prefix}" || true)
 
   if [[ -z "$items" ]]; then
     die "no keys matching prefix: ${prefix}"
@@ -183,6 +211,35 @@ cmd_env() {
   done
 }
 
+cmd_groups() {
+  local items
+  items=$(get_all_items)
+
+  if [[ -z "$items" ]]; then
+    warn "no keys stored"
+    return
+  fi
+
+  # Extract group names (part before first /) and count; ungrouped keys shown as-is
+  local grouped ungrouped
+  grouped=$(echo "$items" | grep '/' | cut -d'/' -f1 | sort | uniq -c | sort -rn || true)
+  ungrouped=$(echo "$items" | grep -v '/' || true)
+
+  printf "${DIM}%-30s %s${NC}\n" "GROUP" "KEYS"
+
+  if [[ -n "$grouped" ]]; then
+    echo "$grouped" | while read -r count name; do
+      printf "  ${CYAN}%-28s${NC} %s\n" "$name/" "$count"
+    done
+  fi
+
+  if [[ -n "$ungrouped" ]]; then
+    local uc
+    uc=$(echo "$ungrouped" | wc -l | tr -d ' ')
+    printf "  ${DIM}%-28s %s${NC}\n" "(ungrouped)" "$uc"
+  fi
+}
+
 cmd_help() {
   cat <<EOF
 ${CYAN}kv${NC} v${VERSION} - Secure API key storage via macOS Keychain
@@ -194,18 +251,23 @@ ${YELLOW}COMMANDS${NC}
   set <name> [value]    Store a key (omit value for secure input)
   get <name> [--print]  Retrieve a key (default: clipboard, 10s clear)
   list [prefix]         List stored key names
-  rm <name>             Delete a key
+  groups                Show all groups with key counts
+  rm <name> [--all]     Delete a key or all keys in a group
   env <prefix>          Export keys as KEY=VALUE format
 
 ${YELLOW}EXAMPLES${NC}
   kv set openai sk-proj-xxxxx
-  kv set openai                   ${DIM}# secure hidden input${NC}
-  echo "sk-xxx" | kv set openai   ${DIM}# pipe (avoids shell history)${NC}
-  kv get openai                   ${DIM}# copy to clipboard${NC}
-  kv get openai --print           ${DIM}# print to terminal${NC}
-  kv list                         ${DIM}# list all keys${NC}
-  kv list aws/                    ${DIM}# filter by prefix${NC}
-  kv env aws/prod/                ${DIM}# export as env vars${NC}
+  kv set openai                       ${DIM}# secure hidden input${NC}
+  echo "sk-xxx" | kv set openai       ${DIM}# pipe (avoids shell history)${NC}
+  kv get openai                       ${DIM}# copy to clipboard${NC}
+  kv get openai --print               ${DIM}# print to terminal${NC}
+  kv list                             ${DIM}# list all keys${NC}
+  kv list openrouter/                 ${DIM}# list keys in a group${NC}
+  kv groups                           ${DIM}# show all groups${NC}
+  kv set openrouter/main sk-or-xxx    ${DIM}# store key in a group${NC}
+  kv set openrouter/dev sk-or-yyy     ${DIM}# another key in same group${NC}
+  kv rm openrouter/ --all             ${DIM}# delete entire group${NC}
+  kv env openrouter/                  ${DIM}# export group as env vars${NC}
 
 ${YELLOW}SECURITY${NC}
   - Keys stored in macOS Keychain (hardware-backed encryption)
@@ -223,6 +285,7 @@ case "$command" in
   set)   cmd_set "$@" ;;
   get)   cmd_get "$@" ;;
   list|ls) cmd_list "$@" ;;
+  groups) cmd_groups "$@" ;;
   rm|delete) cmd_rm "$@" ;;
   env)   cmd_env "$@" ;;
   help|--help|-h) cmd_help ;;
