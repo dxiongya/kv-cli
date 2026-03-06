@@ -9,12 +9,27 @@ const KV_DIR = path.join(os.homedir(), '.kv');
 const KEYCHAIN_PATH = path.join(KV_DIR, 'kv.keychain-db');
 const LOCK_TIMEOUT = 28800; // 8 hours
 
-function exec(cmd) {
+function exec(cmd, env) {
   try {
-    return execSync(cmd, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+    return execSync(cmd, {
+      encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+      ...(env ? { env: { ...process.env, ...env } } : {}),
+    }).trim();
   } catch {
     return null;
   }
+}
+
+/**
+ * Run security command with password via env var (avoids ps aux leak).
+ * Uses: security unlock-keychain -p "$KV_PW" ...
+ */
+function securityWithPassword(subcmd, password) {
+  return exec(
+    `security ${subcmd} -p "$KV_PW" ${kcPath}`,
+    { KV_PW: password }
+  );
 }
 
 function service(name) {
@@ -87,8 +102,7 @@ function init(password) {
     throw new Error('already initialized (~/.kv/kv.keychain-db exists)');
   }
 
-  const pw = shellEscape(password);
-  exec(`security create-keychain -p ${pw} ${kcPath}`);
+  securityWithPassword('create-keychain', password);
   exec(`security set-keychain-settings -t ${LOCK_TIMEOUT} ${kcPath}`);
   addToSearchList();
 }
@@ -109,8 +123,7 @@ function unlock(password) {
     }
   }
 
-  const pw = shellEscape(password);
-  const result = exec(`security unlock-keychain -p ${pw} ${kcPath}`);
+  const result = securityWithPassword('unlock-keychain', password);
   if (result === null) {
     throw new Error('wrong password');
   }
@@ -129,8 +142,7 @@ function changePassword(oldPassword, newPassword) {
     throw new Error('not initialized. Run: kv init');
   }
   // Unlock with old password first
-  const oldPw = shellEscape(oldPassword);
-  const result = exec(`security unlock-keychain -p ${oldPw} ${kcPath}`);
+  const result = securityWithPassword('unlock-keychain', oldPassword);
   if (result === null) {
     throw new Error('wrong current password');
   }
@@ -147,8 +159,7 @@ function changePassword(oldPassword, newPassword) {
   exec(`security delete-keychain ${kcPath}`);
 
   // Create new with new password
-  const newPw = shellEscape(newPassword);
-  exec(`security create-keychain -p ${newPw} ${kcPath}`);
+  securityWithPassword('create-keychain', newPassword);
   exec(`security set-keychain-settings -t ${LOCK_TIMEOUT} ${kcPath}`);
   addToSearchList();
 
