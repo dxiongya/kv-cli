@@ -32,7 +32,7 @@ function set(name, value) {
 
   // Add new
   const result = exec(
-    `security add-generic-password -s ${svc} -a ${user} -w ${val} -T "" -U`
+    `security add-generic-password -s ${svc} -a ${user} -w ${val} -U`
   );
 
   if (result === null) {
