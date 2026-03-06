@@ -222,4 +222,11 @@ const commands = {
 const fn = commands[command];
 if (!fn) die(`unknown command: ${command} (try 'kv help')`);
 
-Promise.resolve(fn()).catch(err => die(err.message));
+try {
+  const result = fn();
+  if (result && typeof result.catch === 'function') {
+    result.catch(err => die(err.message));
+  }
+} catch (err) {
+  die(err.message);
+}
