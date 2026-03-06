@@ -188,7 +188,7 @@ ${c.yellow('EXAMPLES')}
   kv env openrouter/                  ${c.dim('# export group as env vars')}
 
 ${c.yellow('NODE.JS API')}
-  const { kv } = require('clave')
+  const { kv } = require('@safe-labs/kv')
   const key = kv('openrouter')
   const key2 = kv('openrouter/main')
 
