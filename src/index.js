@@ -9,6 +9,11 @@ function kv(name) {
   return keychain.get(name);
 }
 
+kv.init = keychain.init;
+kv.unlock = keychain.unlock;
+kv.changePassword = keychain.changePassword;
+kv.isInitialized = keychain.isInitialized;
+kv.isUnlocked = keychain.isUnlocked;
 kv.set = keychain.set;
 kv.get = keychain.get;
 kv.list = keychain.list;

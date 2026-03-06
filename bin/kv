@@ -4,8 +4,8 @@ const { execSync } = require('child_process');
 const readline = require('readline');
 const keychain = require('../src/keychain');
 
-const VERSION = '2.0.0';
-const CLIP_CLEAR_SECONDS = 10;
+const VERSION = '0.1.0';
+const CLIP_CLEAR_SECONDS = 60;
 
 // Colors
 const c = {
@@ -31,6 +31,35 @@ function warn(msg) {
 
 // --- Commands ---
 
+function cmdInit() {
+  if (keychain.isInitialized()) {
+    die('already initialized. Use "kv passwd" to change master password.');
+  }
+
+  console.log(`${c.cyan('Setting up kv...')}\n`);
+
+  const pw1 = keychain.promptPassword('  Create master password: ');
+  if (!pw1) die('password cannot be empty');
+
+  const pw2 = keychain.promptPassword('  Confirm master password: ');
+  if (pw1 !== pw2) die('passwords do not match');
+
+  keychain.init(pw1);
+  info('initialized. Keys stored in ~/.kv/kv.keychain-db');
+  console.log(`\n  ${c.dim('Auto-locks after 8 hours. Unlock with master password.')}`);
+}
+
+function cmdPasswd() {
+  const oldPw = keychain.promptPassword('  Current password: ');
+  const newPw = keychain.promptPassword('  New password: ');
+  if (!newPw) die('password cannot be empty');
+  const confirmPw = keychain.promptPassword('  Confirm new password: ');
+  if (newPw !== confirmPw) die('passwords do not match');
+
+  const count = keychain.changePassword(oldPw, newPw);
+  info(`password changed. ${count} keys migrated.`);
+}
+
 async function cmdSet(args) {
   const name = args[0];
   let value = args[1];
@@ -39,17 +68,7 @@ async function cmdSet(args) {
 
   if (!value) {
     if (process.stdin.isTTY) {
-      value = await new Promise((resolve) => {
-        process.stdout.write(`${c.cyan('Enter value for ')}${name}${c.cyan(':')} `);
-        const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: true });
-        // Hide input
-        process.stdout.write('\x1b[8m');
-        rl.question('', (answer) => {
-          process.stdout.write('\x1b[28m\n');
-          rl.close();
-          resolve(answer);
-        });
-      });
+      value = keychain.promptPassword(`${c.cyan('Enter value for ')}${name}${c.cyan(':')} `);
     } else {
       value = await new Promise((resolve) => {
         let data = '';
@@ -85,7 +104,6 @@ function cmdGet(args) {
     execSync('pbcopy', { input: value });
     info(`copied ${c.cyan(name)} to clipboard (clears in ${CLIP_CLEAR_SECONDS}s)`);
 
-    // Clear clipboard after timeout
     const child = require('child_process').spawn('bash', ['-c',
       `sleep ${CLIP_CLEAR_SECONDS} && current=$(pbpaste 2>/dev/null) && [ "$current" = '${value.replace(/'/g, "'\\''")}' ] && echo -n "" | pbcopy`
     ], { detached: true, stdio: 'ignore' });
@@ -159,19 +177,38 @@ function cmdEnv(args) {
   }
 }
 
+function cmdStatus() {
+  if (!keychain.isInitialized()) {
+    console.log(`${c.yellow('not initialized')} — run ${c.cyan('kv init')}`);
+    return;
+  }
+  const locked = !keychain.isUnlocked();
+  console.log(`${c.cyan('kv')} v${VERSION}`);
+  console.log(`  status:  ${locked ? c.yellow('locked 🔒') : c.green('unlocked 🔓')}`);
+  console.log(`  store:   ~/.kv/kv.keychain-db`);
+  try {
+    const items = keychain.getAllItems();
+    console.log(`  keys:    ${items.length}`);
+  } catch {
+    console.log(`  keys:    ${c.dim('(unlock to view)')}`);
+  }
+}
+
 function cmdHelp() {
   console.log(`${c.cyan('kv')} v${VERSION} - Secure API key storage via macOS Keychain
 
-${c.yellow('USAGE')}
-  kv <command> [args]
+${c.yellow('SETUP')}
+  kv init                 Set master password & create encrypted store
+  kv passwd               Change master password
+  kv status               Show lock status & key count
 
 ${c.yellow('COMMANDS')}
-  set <name> [value]    Store a key (omit value for secure input)
-  get <name> [--print]  Retrieve a key (default: clipboard, 10s clear)
-  list [prefix]         List stored key names
-  groups                Show all groups with key counts
-  rm <name> [--all]     Delete a key or all keys in a group
-  env <prefix>          Export keys as KEY=VALUE format
+  set <name> [value]      Store a key (omit value for secure input)
+  get <name> [--print]    Retrieve a key (default: clipboard, 10s clear)
+  list [prefix]           List stored key names
+  groups                  Show all groups with key counts
+  rm <name> [--all]       Delete a key or all keys in a group
+  env <prefix>            Export keys as KEY=VALUE format
 
 ${c.yellow('EXAMPLES')}
   kv set openai sk-proj-xxxxx
@@ -179,21 +216,16 @@ ${c.yellow('EXAMPLES')}
   echo "sk-xxx" | kv set openai       ${c.dim('# pipe (avoids shell history)')}
   kv get openai                       ${c.dim('# copy to clipboard')}
   kv get openai --print               ${c.dim('# print to terminal')}
-  kv list                             ${c.dim('# list all keys')}
-  kv set openrouter/main sk-or-xxx    ${c.dim('# store key in a group')}
-  kv set openrouter/dev sk-or-yyy     ${c.dim('# another key in same group')}
   kv groups                           ${c.dim('# show all groups')}
-  kv list openrouter/                 ${c.dim('# list keys in a group')}
   kv rm openrouter/ --all             ${c.dim('# delete entire group')}
-  kv env openrouter/                  ${c.dim('# export group as env vars')}
 
 ${c.yellow('NODE.JS API')}
   const { kv } = require('@safe-labs/kv')
   const key = kv('openrouter')
-  const key2 = kv('openrouter/main')
 
 ${c.yellow('SECURITY')}
-  - Keys stored in macOS Keychain (hardware-backed encryption)
+  - Encrypted keychain with master password (~/.kv/kv.keychain-db)
+  - Auto-locks after 8 hours, re-enter password once to unlock
   - Clipboard auto-clears after ${CLIP_CLEAR_SECONDS}s
   - Use secure input or pipe to avoid shell history leaks`);
 }
@@ -203,6 +235,9 @@ ${c.yellow('SECURITY')}
 const [command = 'help', ...args] = process.argv.slice(2);
 
 const commands = {
+  init: () => cmdInit(),
+  passwd: () => cmdPasswd(),
+  status: () => cmdStatus(),
   set: () => cmdSet(args),
   get: () => cmdGet(args),
   list: () => cmdList(args),

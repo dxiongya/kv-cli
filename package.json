@@ -1,6 +1,6 @@
 {
   "name": "@safe-labs/kv",
-  "version": "0.0.5",
+  "version": "0.1.0",
   "description": "Secure API key storage via macOS Keychain",
   "main": "src/index.js",
   "types": "src/index.d.ts",

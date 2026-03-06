@@ -5,6 +5,11 @@ interface KvGroups {
 
 interface Kv {
   (name: string): string;
+  init(password: string): void;
+  unlock(password?: string): boolean;
+  changePassword(oldPassword: string, newPassword: string): number;
+  isInitialized(): boolean;
+  isUnlocked(): boolean;
   set(name: string, value: string): void;
   get(name: string): string;
   list(prefix?: string): string[];
